@@ -49,7 +49,11 @@ def extract_videos(text):
 
 
 def check_repo(owner, repo, token=None):
-    headers = {"Accept": "application/vnd.github+json"}
+    # 【修改 1】请求头补上 User-Agent，避免被 GitHub 直接拒绝
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "User-Agent": "submit-radar",
+    }
     if token:
         headers["Authorization"] = f"Bearer {token}"
 
@@ -62,10 +66,22 @@ def check_repo(owner, repo, token=None):
     }
 
     api = f"https://api.github.com/repos/{owner}/{repo}"
-    try:
-        r = requests.get(api, headers=headers, timeout=10)
-    except Exception:
-        result["问题"].append("网络请求失败")
+
+    # 【修改 2】失败自动重试一次，并把真实报错类型记录下来
+    r = None
+    last_err = ""
+    for _ in range(2):
+        try:
+            # 【修改 3】超时从 10 秒放宽到 15 秒
+            r = requests.get(api, headers=headers, timeout=15)
+            break
+        except Exception as ex:
+            last_err = type(ex).__name__
+            r = None
+
+    # 【修改 4】网络失败时，把真实原因带出来
+    if r is None:
+        result["问题"].append(f"网络请求失败（{last_err}）")
         return result
 
     if r.status_code == 200:
@@ -75,13 +91,22 @@ def check_repo(owner, repo, token=None):
         result["默认分支"] = data.get("default_branch", "main")
 
         readme_api = f"{api}/readme"
-        rr = requests.get(readme_api, headers=headers, timeout=10)
-        result["README"] = rr.status_code == 200
+        try:
+            rr = requests.get(readme_api, headers=headers, timeout=15)
+            result["README"] = rr.status_code == 200
+        except Exception:
+            result["README"] = False
 
     elif r.status_code == 404:
         result["问题"].append("仓库不存在或私有不可见")
     elif r.status_code in (401, 403):
-        result["问题"].append("令牌无效或权限不足")
+        # 把 GitHub 返回的真实原因带出来，方便区分限流还是权限问题
+        detail = ""
+        try:
+            detail = r.json().get("message", "")
+        except Exception:
+            pass
+        result["问题"].append(f"接口拒绝 {r.status_code}：{detail}")
     else:
         result["问题"].append(f"接口返回 {r.status_code}")
 
@@ -154,7 +179,11 @@ if run and text:
 
             problems = []
             if not info["存在"]:
-                problems.append("仓库不存在或不可访问")
+                # 【修改 4】把真实原因带出来，不再统一伪装成"仓库不存在"
+                if info["问题"]:
+                    problems.extend(info["问题"])
+                else:
+                    problems.append("仓库不存在或不可访问")
             else:
                 if info["私有"] and not token:
                     problems.append("私有仓库，未提供令牌")
@@ -211,3 +240,4 @@ if run and text:
             "提交检查报告.csv",
             "text/csv"
         )
+        
